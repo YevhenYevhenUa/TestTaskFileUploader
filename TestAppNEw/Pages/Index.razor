@@ -1,0 +1,164 @@
+﻿@page "/"
+@inject IConfiguration config
+@inject ILogger<Index> logger
+@using Azure.Storage.Blobs;
+@using Azure.Storage;
+@using System.ComponentModel.DataAnnotations;
+@using Azure.Storage.Sas;
+
+<PageTitle>File uploading</PageTitle>
+
+<figure class="text-center">
+    <blockquote class="blockquote">
+        <p>Upload your file to cloud storage</p>
+    </blockquote>
+</figure>
+
+
+<EditForm Model="_uploadObject" OnValidSubmit="UploadToAzure">
+    <div class="input-group mb-3">
+
+        <label class="input-group-text" for="inputGroupFile01">Upload</label>
+        <InputFile OnChange="@LoadFile" type="file" class="form-control" id="inputGroupFile01" required accept=".docx" />
+    </div>
+
+    <div class="input-group mb-3">
+        <DataAnnotationsValidator />
+        <ValidationSummary />
+        <span class="input-group-text" id="basic-addon1">Email</span>
+        <input type="email" class="form-control" placeholder="Enter your email" aria-label="Email" @bind-value="_uploadObject.Email" aria-describedby="basic-addon1" required>
+
+    </div>
+    @if (_errors.Count == 0 && _uploadObject.BrowserFile is not null)
+    {
+        <button type="submit" class="btn btn-primary btn-lg">Upload file</button>
+    }
+    else
+    {
+        <button type="submit" class="btn btn-primary btn-lg" disabled>Upload file</button>
+    }
+</EditForm>
+
+
+
+@if (_isSuccess)
+{
+    <ul class="text-info mt-3">
+        <li>File is Loaded successfully!</li>
+    </ul>
+}
+
+@if (_errors.Count > 0)
+{
+    <h2 class="mt-3">Errors</h2>
+    <ul class="text-danger">
+        @foreach (var error in _errors)
+        {
+            <li>@error</li>
+        }
+    </ul>
+}
+
+@code
+{
+    public class UploadObject
+    {
+        [Required]
+        [DataType(DataType.EmailAddress)]
+        public string Email { get; set; } = null!;
+        public IBrowserFile? BrowserFile { get; set; }
+    }
+
+    private UploadObject _uploadObject = new UploadObject();
+    private bool _isSuccess;
+    private List<string> _errors = new();
+    private const long MaxFileSize = 1024 * 1024 * 3;
+    private const int MaxAllowedFiles = 1;
+
+    private void LoadFile(InputFileChangeEventArgs inputFile)
+    {
+        _isSuccess = false;
+        _errors = new List<string>();
+        _uploadObject.BrowserFile = inputFile.File;
+        logger.LogInformation("Files loaded by OnChangeIvent");
+        if (inputFile.FileCount > MaxAllowedFiles)
+        {
+            _errors.Add("Only 1 file can be upload at once");
+            return;
+        }
+
+        if (Path.GetExtension(inputFile.File.Name) != ".docx")
+        {
+            _errors.Add("Extension is no match required");
+            return;
+        }
+
+        if (_uploadObject.BrowserFile.Size > MaxFileSize)
+        {
+            _errors.Add("File size bigger than app can hadle");
+            return;
+        }
+    }
+
+    private async Task UploadToAzure()
+    {
+        logger.LogInformation("The Upload button was pressed");
+        string accName = config.GetConnectionString("AccountName");
+        string accKeyy = config.GetConnectionString("AccountKey");
+        string containerName = config.GetConnectionString("СontainerName");
+        IDictionary<string, string> metadata = new Dictionary<string, string>();
+        try
+        {
+            string trustedNameFile = Path.ChangeExtension(Path.GetRandomFileName(), Path.GetExtension(_uploadObject.BrowserFile.Name));
+            logger.LogInformation("Enterd try block");
+            var sasQuery = GetBlobSasQuery(accName, accKeyy, trustedNameFile, containerName);
+
+            UriBuilder uriBuilder = new UriBuilder
+                {
+                    Scheme = "https",
+                    Host = string.Format("{0}.blob.core.windows.net", accName),
+                    Path = string.Format("{0}/{1}", containerName, trustedNameFile),
+                    Query = sasQuery.ToString(),
+
+                };
+
+            metadata["email"] = _uploadObject.Email;
+            var blobClient = new BlobClient(uriBuilder.Uri);
+            logger.LogInformation("File sent to path: {0}", blobClient.Uri.ToString());
+            await blobClient.UploadAsync(_uploadObject.BrowserFile.OpenReadStream());
+            await blobClient.SetMetadataAsync(metadata);
+            logger.LogInformation("File successfully uploaded");
+            _isSuccess = true;
+        }
+        catch (Exception ex)
+        {
+            _errors.Add($"Something went wrong, ex message: {ex.Message}");
+        }
+
+        _uploadObject.BrowserFile = null;
+    }
+
+    private BlobSasQueryParameters GetBlobSasQuery(string accName, string accKeyy, string trustedNameFile, string containerName)
+    {
+        logger.LogInformation("Entered sasBuilder method");
+        string connectionString = config.GetConnectionString("AzureStorageCS");
+        var blobServiceClient = new BlobServiceClient(connectionString);
+        var blobContainerClient = blobServiceClient.GetBlobContainerClient(containerName);
+        BlobClient blobClient = blobContainerClient.GetBlobClient(trustedNameFile);
+
+        var blobSasBuilder = new BlobSasBuilder
+        {
+            StartsOn = DateTime.UtcNow,
+            ExpiresOn = DateTime.UtcNow.AddHours(1),
+            BlobContainerName = containerName,
+            BlobName = trustedNameFile,
+            Resource = "b"
+        };
+
+        blobSasBuilder.SetPermissions(BlobSasPermissions.Create | BlobSasPermissions.Write | BlobSasPermissions.Read);
+        var storageKey = new StorageSharedKeyCredential(accName, accKeyy);
+        BlobSasQueryParameters sasQueryParameters = blobSasBuilder.ToSasQueryParameters(storageKey);
+
+        return sasQueryParameters;
+    }
+}
